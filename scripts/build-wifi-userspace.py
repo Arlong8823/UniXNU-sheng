@@ -57,20 +57,7 @@ entitlements = out / "entitlements.plist"
 entitlements.write_bytes(plistlib.dumps({} if macos else {"com.apple.private.security.no-container": True}))
 subprocess.run(["codesign", "--force", "--sign", "-", "--pagesize", "4096", "--identifier",
     "org.unixnu.wifi.supplicant", "--entitlements", entitlements, binary], check=True)
-
-
-
-#subprocess.run(["codesign", "--verify", "--strict", binary], check=True)
-
-res = subprocess.run([sys.executable, component / "tools/build-supplicant.py", "--target", supplicant_target], capture_output=True, text=True)
-print("=== SUPPLICANT STDOUT ===")
-print(res.stdout)
-print("=== SUPPLICANT STDERR ===")
-print(res.stderr)
-res.check_returncode()
-
-
-
+subprocess.run(["codesign", "--verify", "--strict", binary], check=True)
 detail = subprocess.run(["codesign", "--display", "--verbose=4", binary], check=True,
                         capture_output=True, text=True).stderr
 match = re.search(r"^CDHash=([0-9a-f]{40})$", detail, re.M)
