@@ -1,4 +1,4 @@
-name: pake
+name: pa
 
 # scripts/package.sh of this repository on a macOS runner, with the UniXNU and uefi-sheng
 # checkouts beside it, the layout board.toml names. The platform seed comes from the
@@ -227,6 +227,15 @@ jobs:
           print('total insertions: ' + str(total))
           PYFIX
 
+      - name: proprietary files
+        # Touch / Keyboard (nanosic MCU_Upgrade.bin) / Video (vpu30_4v.mbn) come from the
+        # @fetch mirror of proprietary-files.txt; they are not committed anywhere.
+        working-directory: device
+        run: |
+          python3 scripts/extract-files.py
+          python3 scripts/extract-files.py --check
+          ls -l .cache/firmware/nanosic .cache/firmware/novatek .cache/firmware/qcom/sm8550/sheng
+
       - name: package
         working-directory: device
         env:
@@ -271,4 +280,3 @@ jobs:
             UniXNU/out/sheng/*/*/payload/payload.img
             UniXNU/out/sheng/*/*/kernel/kernel.macho
             UniXNU/out/sheng/*/*/package.manifest.json
-#（注：内容由AI生成）
