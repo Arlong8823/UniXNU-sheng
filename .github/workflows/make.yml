@@ -122,6 +122,41 @@ jobs:
           if not path.is_file() and os.environ['INIT_DATA'] != 'true':
               raise SystemExit('No saved seed. Supply the ORIGINAL seed for an existing installation, or select init_data for a FIRST installation')
           PY
+      - name: fix mesa patch headers
+        # Upstream 82b847c4 ships turnip-frame-diagnostics.patch without the
+        # "new file mode 100644" line, so git apply dies with
+        # "error: dev/null: No such file or directory". Insert the missing
+        # metadata only: hunks, file list and the pinned mesa commit stay as-is.
+        run: |
+          python3 - <<'PYFIX'
+          import json, pathlib, re
+          HDR = re.compile(r'^(diff --git |new file mode |old mode |deleted file mode |index |similarity index |rename from |rename to )')
+          pins = json.loads(pathlib.Path('UniXNU/scripts/data/adreno-compiler-inputs.json').read_text())
+          total = 0
+          for rel in pins['patches']:
+              p = pathlib.Path('UniXNU') / rel
+              if not p.is_file():
+                  continue
+              lines = p.read_text().splitlines(keepends=True)
+              out, n = [], 0
+              for i, ln in enumerate(lines):
+                  if ln.startswith('--- /dev/null'):
+                      j, declared = i - 1, False
+                      while j >= 0 and HDR.match(lines[j]):
+                          if lines[j].startswith('new file mode'):
+                              declared = True
+                          j -= 1
+                      if not declared:
+                          out.append('new file mode 100644\n')
+                          n += 1
+                  out.append(ln)
+              if n:
+                  p.write_text(''.join(out))
+                  total += n
+                  print(rel + ': inserted new file mode x' + str(n))
+          print('total insertions: ' + str(total))
+          PYFIX
+
       - name: package
         working-directory: device
         env:
