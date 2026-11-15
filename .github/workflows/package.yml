@@ -1,4 +1,4 @@
-name: pa
+name: make
 
 # scripts/package.sh of this repository on a macOS runner, with the UniXNU and uefi-sheng
 # checkouts beside it, the layout board.toml names. The platform seed comes from the
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
-          ref: 82b847c4ac3f68a57024b3082ffa3a03442defd9 # Wi-Fi runtime and Data firmware integration
+          ref: main # UniXNU main, the combination the maintainer verifies on hardware
           path: UniXNU
           submodules: recursive
       - uses: actions/checkout@v4
@@ -227,6 +227,31 @@ jobs:
           print('total insertions: ' + str(total))
           PYFIX
 
+      - name: fix fileset stub list
+        # build-fileset-release-reference.py only stubs _native_* and _boot_log_rounds from its
+        # link log; sheng-cache-input-diagnostic.patch also declares a weak_import
+        # boot_cache_input_capture, whose authenticated pointer fails the RELEASE link on arm64e.
+        # Upstream added it to the pattern on 2026-11-10 (00f47f6); this ref predates that.
+        run: |
+          python3 - <<'PYSTUB'
+          import pathlib
+          p = pathlib.Path('UniXNU/scripts/build-fileset-release-reference.py')
+          s = p.read_text()
+          old = '|boot_log_rounds))"'
+          new = '|boot_log_rounds|boot_cache_input_capture))"'
+          if old in s:
+              p.write_text(s.replace(old, new, 1))
+              print('patched fileset stub pattern')
+          elif new in s:
+              print('fileset stub pattern already covers boot_cache_input_capture')
+          else:
+              print('pattern not found; lines mentioning stub_names:')
+              for i, line in enumerate(s.splitlines(), 1):
+                  if 'stub_names' in line:
+                      print(i, line)
+              raise SystemExit(1)
+          PYSTUB
+
       - name: proprietary files
         # Touch / Keyboard (nanosic MCU_Upgrade.bin) / Video (vpu30_4v.mbn) come from the
         # @fetch mirror of proprietary-files.txt; they are not committed anywhere.
@@ -268,7 +293,10 @@ jobs:
       - name: runtime log (on failure)
         if: failure()
         run: |
-          tail -n 200 UniXNU/out/sheng/*/*/logs/runtime.log 2>/dev/null || true
+          for f in $(find UniXNU/out/sheng -maxdepth 8 \( -name 'runtime.log' -o -name 'lto-build.log' -o -name 'archive-*.log' \) 2>/dev/null | head -8); do
+            echo "===== $f ====="
+            tail -n 120 "$f"
+          done
       - name: images
         uses: actions/upload-artifact@v4
         with:
