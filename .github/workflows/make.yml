@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: UniXNU/UniXNU
-          ref: 82b847c4ac3f68a57024b3082ffa3a03442defd9 # Wi-Fi runtime and Data firmware integration
+          ref: main # UniXNU main, the combination the maintainer verifies on hardware
           path: UniXNU
           submodules: recursive
       - uses: actions/checkout@v4
@@ -89,6 +89,76 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write('key=data-seed-v1-' + hashlib.sha256(os.environ['SEED'].encode()).hexdigest()[:16] + '\n')
           PY
+
+      # ========== WiFi 用户态源码预取（缺了这一步 prepare-supplicant.py 必 exit 1） ==========
+      - name: wifi deps cache
+        id: wifi-deps
+        uses: actions/cache/restore@v4
+        with:
+          path: device/drivers/Ath12kWifi/deps
+          key: ath12k-deps-v2-${{ runner.os }}-${{ hashFiles('device/drivers/Ath12kWifi/**/source-lock.json') }}
+          restore-keys: |
+            ath12k-deps-v2-${{ runner.os }}-
+
+      - name: wifi deps fetch
+        if: steps.wifi-deps.outputs.cache-hit != 'true'
+        working-directory: device
+        run: |
+          set -euo pipefail
+          f=drivers/Ath12kWifi/tools/fetch-sources.py
+          [ -f "$f" ] || f=$(find . -type f -name fetch-sources.py -not -path '*/deps/*' | head -1)
+          [ -n "$f" ] || { echo "fetch-sources.py not found"; exit 1; }
+          # cone 模式不接受 "/" 开头路径，换成非 cone（路径数组保持原样）
+          python3 - "$f" <<'PY'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1]); s = p.read_text()
+          s2 = s.replace('"sparse-checkout", "add"', '"sparse-checkout", "set", "--no-cone"')
+          if s2 == s:
+              print("sparse-checkout pattern not found (already patched?); continuing")
+          else:
+              p.write_text(s2); print("patched sparse-checkout -> set --no-cone")
+          PY
+          echo "=== running $f (real fetch, no --check) ==="
+          python3 "$f"
+          echo "=== deps after fetch ==="
+          ls -la drivers/Ath12kWifi/deps
+
+      - name: wifi deps verify
+        working-directory: device
+        run: |
+          set -euo pipefail
+          f=drivers/Ath12kWifi/tools/fetch-sources.py
+          [ -f "$f" ] || f=$(find . -type f -name fetch-sources.py -not -path '*/deps/*' | head -1)
+          python3 "$f" --check
+
+      - name: wifi deps save
+        if: always() && steps.wifi-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: device/drivers/Ath12kWifi/deps
+          key: ath12k-deps-v2-${{ runner.os }}-${{ hashFiles('device/drivers/Ath12kWifi/**/source-lock.json') }}
+
+      - name: wifi deps diagnose (on failure)
+        if: failure()
+        working-directory: device
+        run: |
+          echo "=== deps tree ==="
+          ls -la drivers/Ath12kWifi/deps 2>/dev/null || echo "no deps dir"
+          echo "=== tarballs ==="
+          find . -path '*/deps/*' -name '*.tar.gz' -exec shasum -a 256 {} \; 2>/dev/null || true
+
+      - name: wifi probe
+        working-directory: device
+        run: |
+          set -x
+          echo "--- fetch-sources --check ---"
+          python3 drivers/Ath12kWifi/tools/fetch-sources.py --check || echo "CHECK_RC=$?"
+          echo "--- deps listing ---"
+          ls -l drivers/Ath12kWifi/deps || true
+          echo "--- prepare-supplicant ---"
+          python3 drivers/Ath12kWifi/tools/prepare-supplicant.py || echo "PREPARE_RC=$?"
+      # ==========================================================================
+
       - uses: actions/cache/restore@v4
         id: data-cache
         if: inputs.os == '27'
@@ -157,6 +227,40 @@ jobs:
           print('total insertions: ' + str(total))
           PYFIX
 
+      - name: fix fileset stub list
+        # build-fileset-release-reference.py only stubs _native_* and _boot_log_rounds from its
+        # link log; sheng-cache-input-diagnostic.patch also declares a weak_import
+        # boot_cache_input_capture, whose authenticated pointer fails the RELEASE link on arm64e.
+        # Upstream added it to the pattern on 2026-11-10 (00f47f6); this ref predates that.
+        run: |
+          python3 - <<'PYSTUB'
+          import pathlib
+          p = pathlib.Path('UniXNU/scripts/build-fileset-release-reference.py')
+          s = p.read_text()
+          old = '|boot_log_rounds))"'
+          new = '|boot_log_rounds|boot_cache_input_capture))"'
+          if old in s:
+              p.write_text(s.replace(old, new, 1))
+              print('patched fileset stub pattern')
+          elif new in s:
+              print('fileset stub pattern already covers boot_cache_input_capture')
+          else:
+              print('pattern not found; lines mentioning stub_names:')
+              for i, line in enumerate(s.splitlines(), 1):
+                  if 'stub_names' in line:
+                      print(i, line)
+              raise SystemExit(1)
+          PYSTUB
+
+      - name: proprietary files
+        # Touch / Keyboard (nanosic MCU_Upgrade.bin) / Video (vpu30_4v.mbn) come from the
+        # @fetch mirror of proprietary-files.txt; they are not committed anywhere.
+        working-directory: device
+        run: |
+          python3 scripts/extract-files.py
+          python3 scripts/extract-files.py --check
+          ls -l .cache/firmware/nanosic .cache/firmware/novatek .cache/firmware/qcom/sm8550/sheng
+
       - name: package
         working-directory: device
         env:
@@ -186,6 +290,13 @@ jobs:
           path: |
             UniXNU/out/sheng/*/*/runtime/data.dbr
             UniXNU/out/sheng/*/*/runtime/inputs.json
+      - name: runtime log (on failure)
+        if: failure()
+        run: |
+          for f in $(find UniXNU/out/sheng -maxdepth 8 \( -name 'runtime.log' -o -name 'lto-build.log' -o -name 'archive-*.log' \) 2>/dev/null | head -8); do
+            echo "===== $f ====="
+            tail -n 120 "$f"
+          done
       - name: images
         uses: actions/upload-artifact@v4
         with:
