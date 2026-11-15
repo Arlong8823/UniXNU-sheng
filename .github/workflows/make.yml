@@ -37,6 +37,10 @@ on:
         description: "macOS 27 only: paste the sudo command printed by the failed seed build to reuse it on later runs"
         type: string
         default: ""
+      build_userdata:
+        description: "Also build the system image (userdata-root.img). Adds a long step; output is gzipped and split at 8 GiB"
+        type: boolean
+        default: true
 permissions:
   contents: read
 concurrency:
@@ -185,6 +189,24 @@ jobs:
             args+=(--init-data)
           fi
           scripts/package.sh "${args[@]}"
+      - name: build userdata (system image)
+        # package.sh 的固定步骤不含 userdata；系统分区镜像必须单独点名才构建。
+        # 产物很大，先 gzip -1 再按 8 GiB 切片，避免单 artifact 上限和上传超时；
+        # 还原：cat userdata-root.img.gz.part* | gunzip > userdata-root.img
+        if: inputs.build_userdata
+        env:
+          UNIXNU_UNIQUE_CHIP_ID: ${{ secrets.UNIXNU_UNIQUE_CHIP_ID }}
+          OS_PROFILE: ${{ inputs.os }}
+        run: |
+          cd UniXNU
+          ./unixnu build userdata --os "$OS_PROFILE" -D ../device --dry-run
+          ./unixnu build userdata --os "$OS_PROFILE" -D ../device
+          img=$(ls out/sheng/*/*/userdata/userdata-root.img)
+          ls -l "$img"
+          cat "$(dirname "$img")/userdata-root.json"
+          gzip -1 -f "$img"
+          cd "$(dirname "$img")" && split -b 8G -d -a 3 userdata-root.img.gz userdata-root.img.gz.part
+          ls -l userdata-root.img.gz.part*
       - uses: actions/cache/save@v4
         if: always() && inputs.os != '17' && steps.data-cache.outputs.cache-hit != 'true' && hashFiles('UniXNU/out/sheng/*/*/runtime/data.dbr') != ''
         with:
@@ -212,3 +234,5 @@ jobs:
             UniXNU/out/sheng/*/*/payload/payload.img
             UniXNU/out/sheng/*/*/kernel/kernel.macho
             UniXNU/out/sheng/*/*/package.manifest.json
+            UniXNU/out/sheng/*/*/userdata/userdata-root.json
+            UniXNU/out/sheng/*/*/userdata/userdata-root.img.gz.part*
