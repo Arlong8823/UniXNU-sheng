@@ -1,18 +1,28 @@
 name: package
-
 # scripts/package.sh of this repository on a macOS runner, with the UniXNU and uefi-sheng
 # checkouts beside it, the layout board.toml names. The platform seed comes from the
 # repository secret UNIXNU_UNIQUE_CHIP_ID and is baked into the images, so the run's
 # artifacts belong to one device alone: download them, then delete the run.
-
+#
+# ---------------------------------------------------------------------------
+# 本文件相对上游 make.yml 的改动（可直接覆盖到 fork 的 .github/workflows/make.yml）：
+#   1. inputs.os 增加 "macos-27"（macOS 27.3 / build 26C5035r），默认值改为 macos-27
+#   2. Data seed 的 cache restore / save / 备份路径改为通配 out/sheng/*/*/runtime/，
+#      同时覆盖 ipados-27.0.1-24A446 与 macos-27.3-26C5035r 两个 profile
+#   3. 新增 "macOS data seed" 步骤与 macos_seed_cmd 输入：macOS 的 seed 必须以 root
+#      生成，首跑会停在 package 步并打印 sudo 命令，把那行粘进 macos_seed_cmd 再跑即可
+#   4. artifacts 保留期 1 天 -> 3 天（仍要跑完立刻下载）
+#   5. UniXNU 的 ref 保留原 pin；若 --os macos-27 报 unknown OS profile，换成
+#      be0e4fab0072bceaa8d744a4a6875ba5461cd7ff（含 GPU/Metal/display 集成）或更新的 commit
+# ---------------------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
       os:
         description: "OS profile of the images"
         type: choice
-        options: ["27", "26", "17"]
-        default: "27"
+        options: ["macos-27", "27", "26", "17"]
+        default: "macos-27"
       init_data:
         description: "Create a NEW installation seed if no saved seed exists (iPadOS 27 only)"
         type: boolean
@@ -23,14 +33,15 @@ on:
       data_seed_sha256:
         description: "Required SHA-256 when data_seed_url is supplied"
         type: string
-
+      macos_seed_cmd:
+        description: "macOS 27 only: paste the sudo command printed by the failed seed build to reuse it on later runs"
+        type: string
+        default: ""
 permissions:
   contents: read
-
 concurrency:
   group: package-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   package:
     runs-on: macos-26
@@ -91,11 +102,11 @@ jobs:
           PY
       - uses: actions/cache/restore@v4
         id: data-cache
-        if: inputs.os == '27'
+        if: inputs.os != '17'
         with:
           path: |
-            UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr
-            UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/inputs.json
+            UniXNU/out/sheng/*/*/runtime/data.dbr
+            UniXNU/out/sheng/*/*/runtime/inputs.json
           key: ${{ steps.seed-key.outputs.key }}-${{ inputs.os }}
       - name: prepare preserved Data seed
         if: inputs.os == '27'
@@ -122,6 +133,26 @@ jobs:
           if not path.is_file() and os.environ['INIT_DATA'] != 'true':
               raise SystemExit('No saved seed. Supply the ORIGINAL seed for an existing installation, or select init_data for a FIRST installation')
           PY
+      - name: macOS data seed
+        # macOS 27.3 的 Data seed 必须以 root 从系统卷 /System/Library/Templates/Data 生成。
+        # 首跑留空 macos_seed_cmd：package.sh 会在 seed 步停下并打印完整 sudo 命令，
+        # 把那行原样粘进 macos_seed_cmd 再跑一次；生成成功后会被 cache 存住，后续直接复用。
+        if: inputs.os == 'macos-27'
+        env:
+          SEED_CMD: ${{ inputs.macos_seed_cmd }}
+        run: |
+          if ls UniXNU/out/sheng/*/*/runtime/data.dbr >/dev/null 2>&1; then
+            echo "seed restored from cache"
+            ls -l UniXNU/out/sheng/*/*/runtime/data.dbr
+            exit 0
+          fi
+          if [ -n "$SEED_CMD" ]; then
+            echo "running the supplied seed command"
+            ( cd UniXNU && bash -c "$SEED_CMD" )
+            ls -l out/sheng/*/*/runtime/data.dbr
+          else
+            echo "no saved seed and macos_seed_cmd is empty: the package step will stop and print the exact sudo command"
+          fi
       - name: fix fileset stub list
         # UniXNU 82b847c4 stubs only _native_* and _boot_log_rounds from its release link log;
         # sheng-cache-input-diagnostic.patch also declares a weak_import boot_cache_input_capture,
@@ -141,7 +172,6 @@ jobs:
           else:
               raise SystemExit('stub pattern not found')
           PYSTUB
-
       - name: package
         working-directory: device
         env:
@@ -156,18 +186,18 @@ jobs:
           fi
           scripts/package.sh "${args[@]}"
       - uses: actions/cache/save@v4
-        if: always() && inputs.os == '27' && steps.data-cache.outputs.cache-hit != 'true' && hashFiles('UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr') != ''
+        if: always() && inputs.os != '17' && steps.data-cache.outputs.cache-hit != 'true' && hashFiles('UniXNU/out/sheng/*/*/runtime/data.dbr') != ''
         with:
           path: |
-            UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr
-            UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/inputs.json
+            UniXNU/out/sheng/*/*/runtime/data.dbr
+            UniXNU/out/sheng/*/*/runtime/inputs.json
           key: ${{ steps.seed-key.outputs.key }}-${{ inputs.os }}
       - name: installation seed backup
-        if: always() && inputs.os == '27' && hashFiles('UniXNU/out/sheng/ipados-27.0.1-24A446/sheng_ipados27/runtime/data.dbr') != ''
+        if: always() && inputs.os != '17' && hashFiles('UniXNU/out/sheng/*/*/runtime/data.dbr') != ''
         uses: actions/upload-artifact@v4
         with:
           name: installation-seed-${{ inputs.os }}
-          retention-days: 1
+          retention-days: 3
           path: |
             UniXNU/out/sheng/*/*/runtime/data.dbr
             UniXNU/out/sheng/*/*/runtime/inputs.json
@@ -175,7 +205,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: images-${{ inputs.os }}
-          retention-days: 1
+          retention-days: 3
           if-no-files-found: error
           path: |
             UniXNU/out/sheng/*/*/boot/boot.img
